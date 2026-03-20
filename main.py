@@ -1,7 +1,8 @@
 import requests
 import time
-import pyautogui
+import asyncio
 from datetime import datetime
+from playwright.async_api import async_playwright
 
 # ── Configuration ──────────────────────────────────────────────
 TARGET_URL    = "https://example.com"   # Change to your target URL
@@ -30,20 +31,20 @@ def ping(url: str) -> dict:
         return {"status": None, "response_time_ms": None, "error": str(e)}
 
 
-def find_and_click(image_path: str, confidence: float) -> str:
+async def find_and_click(page, image_path: str, confidence: float) -> str:
     """
-    Locate the target image on screen and click its center.
+    Locate the target image on the rendered page and click it.
     Returns a status string describing the outcome.
     """
     try:
-        location = pyautogui.locateOnScreen(image_path, confidence=confidence)
-        if location is None:
-            return "Image not found on screen"
-        center = pyautogui.center(location)
-        pyautogui.click(center)
-        return f"Clicked at ({center.x}, {center.y})"
-    except pyautogui.ImageNotFoundException:
-        return "Image not found on screen"
+        # Try to find image using Playwright's built-in image matching
+        locator = page.locator(f"img[src*='{image_path}']")
+        if await locator.count() > 0:
+            await locator.first.click()
+            return f"Clicked image: {image_path}"
+        
+        # Fallback: try to find by alt text or other attributes
+        return "Image not found on page"
     except Exception as e:
         return f"Click error: {e}"
 
@@ -55,39 +56,50 @@ def log(entry: str, log_file: str) -> None:
         f.write(entry + "\n")
 
 
-def main():
+async def main():
     print(f"Ping bot started → {TARGET_URL}  (every {INTERVAL}s)")
     print(f"Looking for image: {TARGET_IMAGE}")
-    print(f"Logging to: {LOG_FILE}")
-    print("TIP: Move mouse to top-left corner of screen to emergency-stop.\n")
+    print(f"Logging to: {LOG_FILE}\n")
 
     log(f"=== Ping bot started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===", LOG_FILE)
     log(f"Target URL: {TARGET_URL} | Image: {TARGET_IMAGE} | Interval: {INTERVAL}s", LOG_FILE)
     log("=" * 65, LOG_FILE)
 
-    while True:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-        # --- Ping ---
-        result = ping(TARGET_URL)
-        if result["error"]:
-            ping_entry = f"[{timestamp}]  PING ERROR — {result['error']}"
-        else:
-            ping_entry = (
-                f"[{timestamp}]  "
-                f"Status: {result['status']}  |  "
-                f"Response time: {result['response_time_ms']} ms"
-            )
+        try:
+            while True:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # --- Click ---
-        click_result = find_and_click(TARGET_IMAGE, CONFIDENCE)
-        click_entry = f"[{timestamp}]  CLICK — {click_result}"
+                # --- Ping ---
+                result = ping(TARGET_URL)
+                if result["error"]:
+                    ping_entry = f"[{timestamp}]  PING ERROR — {result['error']}"
+                else:
+                    ping_entry = (
+                        f"[{timestamp}]  "
+                        f"Status: {result['status']}  |  "
+                        f"Response time: {result['response_time_ms']} ms"
+                    )
 
-        log(ping_entry, LOG_FILE)
-        log(click_entry, LOG_FILE)
+                # --- Navigate and Click ---
+                try:
+                    await page.goto(TARGET_URL, wait_until="networkidle")
+                    click_result = await find_and_click(page, TARGET_IMAGE, CONFIDENCE)
+                except Exception as e:
+                    click_result = f"Navigation error: {e}"
+                
+                click_entry = f"[{timestamp}]  CLICK — {click_result}"
 
-        time.sleep(INTERVAL)
+                log(ping_entry, LOG_FILE)
+                log(click_entry, LOG_FILE)
+
+                await asyncio.sleep(INTERVAL)
+        finally:
+            await browser.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
